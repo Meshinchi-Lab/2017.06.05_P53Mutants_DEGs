@@ -1,0 +1,242 @@
+---
+title: "P53 Mutants DE Analysis"
+author: "Jenny Smith"
+date: "June 5, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.06.05_P53Mutants_DEGs/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(survival)
+library(dendextend)
+getwd()
+```
+
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/DifferentialExpressionPipeline.r")
+# source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+# source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Limma_DE_Function.r")
+# source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/clusterAnalysis_Function.r")
+# source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Expression_Distribution_Plots_Function.r")
+```
+
+```{r}
+twoGroups_DEGs <- function(expnData, clinData, col, ref, BM=FALSE){
+  # expnData is a matrix or data frame with the raw counts. Patient IDs as colnames, genes as rownames
+  #clindata has patient IDs as rownames. 
+  library(magrittr)
+  library(genefilter)
+  
+  
+  #remove unknown categories from the datasets since only want yes/no or 0/1 groups
+  rmUnknowns <- function(clinData, cols){
+    removeUnknowns <- clinData
+    
+    for (i in 1:length(cols)){
+      removeUnknowns <- removeUnknowns[!grepl("Unknown",removeUnknowns[, cols[i]]), ] 
+    }
+    return(removeUnknowns)
+  }
+  
+  clinData <- rmUnknowns(clinData, col)
+  groups <- GroupIDs(clinData, col) #list of patient IDs, one for each group
+  
+  if(BM == TRUE){
+    BM <- rep("BM", length(grep("^BM", colnames(expnData)))) %>% setNames(grep("^BM", colnames(expnData), value = TRUE))
+    GroupB <- BM #select the reference group (eg No, normal, wt, control, etc.) Must be a character(level) from the column of clinData selected. 
+    GroupA <- groups[[which(names(groups) != ref)]] %>% intersect(. , colnames(expnData)) #the second group (mutant, AML, treated, etc)
+  }else{
+    GroupB <- groups[[ref]] %>% intersect(. , colnames(expnData)) #select the reference group (eg No, normal, wt, control, etc.) Must be a character(level) from the column of clinData selected. 
+    GroupA <- groups[[which(names(groups) != ref)]] %>% intersect(. , colnames(expnData)) #the second group (mutant, AML, treated, etc)
+  }
+  
+  phenoVector <- phenoVectors(GroupA, GroupB)
+  
+  #subset and order the dataframe.
+  expnData <- expnData[,match(c(GroupA, GroupB), colnames(expnData))] #mutant, then WT
+  
+  #Calculate Differential Expression
+  DE <- calcDE(expnData,GroupA, GroupB, logCPM=TRUE, Trend = TRUE) #mutant - wild type. logCPM the counts
+  #NOTE: I included a more stringent filter here, so 5% of samples must have logCPM of greater than 1 for inclusion in analysis
+  #this usually results in ~18,000 genes included in each analysis. 
+  
+  if (nrow(DE$DE) < 1){
+    PCA <- plotPCA(expnData, clinData, col)
+    list <- list(DE, PCA)
+    return(DE)
+  }else{
+    
+  #Top Varied genes
+  genes <- expnData[order(rowVars(expnData),decreasing=TRUE), ]
+  genes <- genes[1:500]
+  
+  #Unsupervised Heirachrach clustering
+  dends_DE <- dge_dendrograms(expnData, phenoVector, rownames(DE$DE), method="ward.D2") #dendrograms based on all differentially expressed genes.
+  colorBar <- ifelse(phenoVector == ref, "black", "firebrick")
+  heatmap <- basicHeatmap(dends_DE$TMMCPM, dends_DE$c2, dends_DE$c1,colorBar)
+  
+  #Unconstrained Cluster Analysis
+  ## PCoA
+  merged <- merge_CDE_Expn(clinData, expnData, genes) #do not add the phenovector bc it adds a "status" column, making subsetting more difficult.
+  MDS <- plotPCoA(merged,genes, col)
+  ## PCA
+  PCA <- plotPCA(expnData, clinData, genes, col)
+  
+  #return the objects
+  list <- list(clinData, phenoVector, expnData, DE, genes, dends_DE, heatmap, MDS, PCA)
+  names(list) <- c("subsetClinData", "phenovector", "subsetExpnMatrix", "DE", "topVargenes", "dends_DE", "MDS", "PCA")
+  
+  # temp <- list(phenoVector)
+  return(list)
+  }
+}
+```
+
+
+#Clinical Data
+```{r}
+clinData <- read.csv("~/reference_mapping-files/New_stratification_outcomes_FORMATTED_updated_2017.03.28.csv", stringsAsFactors = FALSE, row.names = 1)
+
+head(clinData[,8:10])
+```
+
+#P53 Mutants
+
+From email with Rhonda, Fri 6/2/2017 4:01 PM
+```{r}
+pos <- c("PAPUEM",
+"PARJYP",
+"PARMHD",
+"PARPZP",
+"PASTVM",
+"PASTZK",
+"PASZAF",
+"PASZZE",
+"PATLZB")
+```
+
+
+```{r}
+clinData$P53 <- ifelse(rownames(clinData) %in% pos, "Yes", "No") #not entirely accurate. some unknowns as well 
+```
+
+
+
+#Raw Counts
+```{r}
+counts <- get(load("~/RNA_seq_Analysis/2017.06.05_P53Mutants_DEGs/RNAseq_Counts_HD_LD_batchCorrected.RData"))
+```
+
+```{r}
+LD <- counts$LD #use non-batch corrected reads. 
+```
+
+
+```{r}
+dim(LD)
+```
+
+
+
+#Perform the differential Expression 
+
+```{r}
+DEGs <- twoGroups_DEGs(LD, clinData, "P53", "No")
+
+summary(DEGs)
+```
+
+
+
+```{r}
+plotPCA <- function(expnData,clinData, factor){
+  #df is the dataframe with genes as colnames, patient IDs as rownames. df also has the factor data, such as mutation status pos,neg. 
+  #cols specifies the numeric columns with expn values. 
+  #factor is the name of the factor column 
+  source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/merge_clinData_ExpnData_Functions.r")
+  library(genefilter)
+  
+  #originally this was Ngenes <- ncol(expnData) - 10  
+  Ngenes <- length(which(colnames(expnData) %in% rownames(clinData))) - 10 #ensure that number of genes is less than #samples
+
+  topVarGenes <- rownames(expnData[order(rowVars(expnData),decreasing=TRUE), ] %>% .[1:Ngenes, ])
+  pca_df <- merge_CDE_Expn(clinData,expnData, topVarGenes) #merge causes loss of rownames. 
+  
+  #remove hyphens to match colnames. log.expn was once hardcoded to cols the lengthof the topVarGenes. 
+  topVarGenes <- gsub("\\-", "\\.", topVarGenes) 
+  log.expn <- log2(pca_df[,topVarGenes] + 0.01)
+  pca.scaled <- scale(log.expn)
+  
+  pca <- princomp(pca.scaled,cor = T, scores = T)
+  scores <- as.data.frame(unclass(pca$scores))
+  
+  pca_plot <- ggplot(scores, aes(x=scores$Comp.1, y=scores$Comp.2))
+  
+  pca_plot <- pca_plot + geom_point(aes(color=factor(pca_df[,factor]))) + theme_bw() +
+    labs(title = "Z-Scores of TARGET AML Gene Expression Levels", x = "principal Component 1", y = "principal Component 2")
+  
+  list <- list(pca_df,pca, scores, pca_plot, topVarGenes)
+  names(list) <- c("pca_df", "pca", "scores", "pca_plot", "topVarGenes")
+  
+  return(list)
+}
+```
+
+
+
+#Principal Component Analysis
+
+```{r}
+pca <- plotPCA(LD, clinData, factor = "P53")
+```
+
+```{r}
+# pca$pca_df
+```
+
+```{r}
+# pca$scores
+```
+
+```{r}
+percVar <- (pca$pca$sdev^2)/sum(pca$pca$sdev^2)*100
+plot(percVar[1:10], xlab = "Principal Component", ylab = "Percentage of Variance Explained",
+type = "b", pch = 16, ylim = c(0, 40), xlim = c(1, 10), main = "Percent Variance Exlpained in PCA analysis",
+col = "dark blue")
+```
+
+```{r}
+percVarExpl <- data.frame(PercentVariation=percVar, 
+              Component=names(percVar))
+
+percVarExpl <- percVarExpl[1:10, ]
+
+ggplot(percVarExpl, aes(x=reorder(percVarExpl$Component,-percVarExpl[,"PercentVariation"]), y=percVarExpl$PercentVariation, group=1)) + geom_point() + geom_line() + labs(title="Scree Plot: Percent Variation Explained by Component", y="Percent of Variation", x="Principal Component") + theme_bw()
+```
+
+
+```{r}
+# install.packages("scatterplot3d") # Install
+library("scatterplot3d") # load
+```
+
+```{r}
+# png(file="pca_P53Mutants_3d.png")
+colors <- ifelse(pca$pca_df$P53 == "Yes", "aquamarine3", "salmon")
+scatterplot3d(pca$scores[,1:3], pch = 16, color = colors, cex.symbols = 0.8)
+# dev.off()
+```
+
